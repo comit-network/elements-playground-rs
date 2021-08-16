@@ -1,5 +1,5 @@
 import Debug from "debug";
-import { browser } from "webextension-polyfill-ts";
+import { browser, Windows } from "webextension-polyfill-ts";
 import WavesProvider from "../in-page";
 import { BackupDetails, LoanDetails, LoanToSign, SwapToSign, Txid } from "../models";
 import {
@@ -43,6 +43,8 @@ var loanToSign: LoanToSign | null;
 var resolveLoanSignRequest: ((txid: Txid) => void) | null;
 var rejectLoanSignRequest: ((e: any) => void) | null;
 
+var popup: Windows.Window | null;
+
 export interface RpcMessage<T extends keyof WavesProvider> {
     type: "rpc-message";
     method: T;
@@ -79,6 +81,7 @@ addRpcMessageListener("signAndSendSwap", ([txHex]) => {
                 rejectSwapSignRequest = reject;
 
                 updateBadge();
+                openPopup();
             })
             .catch(e => {
                 reject(e);
@@ -95,6 +98,7 @@ addRpcMessageListener("signLoan", ([loanRequest]) => {
                 rejectLoanSignRequest = reject;
 
                 updateBadge();
+                openPopup();
             })
             .catch(e => {
                 reject(e);
@@ -102,6 +106,16 @@ addRpcMessageListener("signLoan", ([loanRequest]) => {
             });
     });
 });
+
+async function openPopup() {
+    popup = await browser.windows.create({
+        focused: true,
+        width: 400,
+        height: 600,
+        type: "popup",
+        url: "popup.html",
+    });
+}
 
 function addRpcMessageListener<T extends keyof WavesProvider>(
     method: T,
@@ -254,6 +268,7 @@ function cleanupPendingSwap() {
     rejectSwapSignRequest = null;
     swapToSign = null;
     updateBadge();
+    closePopup();
 }
 
 function cleanupPendingLoan() {
@@ -261,6 +276,15 @@ function cleanupPendingLoan() {
     rejectLoanSignRequest = null;
     loanToSign = null;
     updateBadge();
+
+    closePopup();
+}
+
+function closePopup() {
+    if (popup && popup.id) {
+        browser.windows.remove(popup.id);
+        popup = null;
+    }
 }
 
 // First we check environment variable. If set, we honor it and overwrite settings in local storage.
