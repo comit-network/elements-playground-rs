@@ -120,10 +120,7 @@ pub async fn make_loan_request(
 
     let storage = Storage::local_storage().map_err(Error::Storage)?;
     storage
-        .set_item(
-            "borrower_state",
-            serde_json::to_string(&borrower_state_0).map_err(Error::Serialize)?,
-        )
+        .set_json_item("borrower0_state", &borrower_state_0)
         .map_err(Error::Save)?;
 
     // TODO: Fix, use new API here
@@ -141,8 +138,6 @@ pub enum Error {
     Storage(anyhow::Error),
     #[error("Failed to save item to storage: {0}")]
     Save(anyhow::Error),
-    #[error("Serialization failed: {0}")]
-    Serialize(serde_json::Error),
 }
 
 /// Calculate the fee offset required for the coin selection algorithm.

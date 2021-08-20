@@ -30,10 +30,9 @@ pub async fn repay_loan(
     let storage = Storage::local_storage().map_err(Error::Storage)?;
 
     let borrower = storage
-        .get_item::<String>(&format!("loan_state:{}", loan_txid))
+        .get_json_item::<Borrower1>(&format!("loan_state:{}", loan_txid))
         .map_err(Error::Load)?
         .ok_or(Error::EmptyState)?;
-    let borrower = serde_json::from_str::<Borrower1>(&borrower).map_err(Error::Deserialize)?;
 
     let blinding_key = {
         let wallet = current(&name, current_wallet)
@@ -177,23 +176,17 @@ pub async fn repay_loan(
         .remove_item(&format!("loan_state:{}", loan_txid))
         .map_err(Error::Delete)?;
 
-    let open_loans = match storage
-        .get_item::<String>("open_loans")
+    let open_loans = storage
+        .get_json_item::<Vec<LoanDetails>>("open_loans")
         .map_err(Error::Load)?
-    {
-        Some(open_loans) => serde_json::from_str(&open_loans).map_err(Error::Deserialize)?,
-        None => Vec::<LoanDetails>::new(),
-    };
+        .unwrap_or_default();
 
     let open_loans = open_loans
         .iter()
         .filter(|details| loan_txid != details.txid)
         .collect::<Vec<_>>();
     storage
-        .set_item(
-            "open_loans",
-            serde_json::to_string(&open_loans).map_err(Error::Serialize)?,
-        )
+        .set_json_item("open_loans", &open_loans)
         .map_err(Error::Save)?;
 
     Ok(repayment_txid)
@@ -207,10 +200,6 @@ pub enum Error {
     Storage(anyhow::Error),
     #[error("Failed to load item from storage: {0}")]
     Load(anyhow::Error),
-    #[error("Deserialization failed: {0}")]
-    Deserialize(serde_json::Error),
-    #[error("Serialization failed: {0}")]
-    Serialize(serde_json::Error),
     #[error("Failed to delete item from storage: {0}")]
     Delete(anyhow::Error),
     #[error("Failed to save item to storage: {0}")]

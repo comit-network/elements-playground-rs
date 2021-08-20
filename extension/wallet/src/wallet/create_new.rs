@@ -23,7 +23,7 @@ pub async fn create_from_bip39(
     let storage = Storage::local_storage()?;
 
     let mut wallets = storage
-        .get_item::<ListOfWallets>("wallets")?
+        .get_json_item::<ListOfWallets>("wallets")?
         .unwrap_or_default();
 
     if wallets.has(&name) {
@@ -55,7 +55,7 @@ pub async fn create_from_bip39(
         ),
     )?;
     wallets.add(name);
-    storage.set_item("wallets", wallets)?;
+    storage.set_json_item("wallets", wallets)?;
 
     current_wallet.lock().await.replace(new_wallet);
 

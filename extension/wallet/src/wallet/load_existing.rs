@@ -22,7 +22,7 @@ pub async fn load_existing(
 
     let storage = Storage::local_storage()?;
     let wallets = storage
-        .get_item::<ListOfWallets>("wallets")?
+        .get_json_item::<ListOfWallets>("wallets")?
         .unwrap_or_default();
 
     if !wallets.has(&name) {

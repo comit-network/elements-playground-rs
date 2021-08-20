@@ -174,7 +174,7 @@ window.signLoan = async () => {
     // that the wallet is signing the same transaction the user has authorised
 
     // if we receive an error, we respond directly, else we return the details
-    return await signLoan(walletName).catch(rejectLoanSignRequest);
+    return signLoan(walletName).catch(rejectLoanSignRequest);
 };
 
 // @ts-ignore

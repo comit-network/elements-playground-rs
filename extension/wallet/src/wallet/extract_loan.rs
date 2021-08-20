@@ -40,10 +40,9 @@ pub async fn extract_loan(
 
     let storage = Storage::local_storage().map_err(Error::Storage)?;
     let borrower = storage
-        .get_item::<String>("borrower_state")
+        .get_json_item::<Borrower0>("borrower0_state")
         .map_err(Error::Load)?
         .ok_or(Error::EmptyState)?;
-    let borrower = serde_json::from_str::<Borrower0>(&borrower).map_err(Error::Deserialize)?;
 
     let borrower = borrower
         .interpret(SECP256K1, loan_response)
@@ -86,10 +85,7 @@ pub async fn extract_loan(
     .map_err(Error::LoanDetails)?;
 
     storage
-        .set_item(
-            "borrower_state",
-            serde_json::to_string(&(borrower, loan_details.clone())).map_err(Error::Serialize)?,
-        )
+        .set_json_item("borrower_state", (&borrower, &loan_details))
         .map_err(Error::Save)?;
 
     Ok(loan_details)
@@ -111,10 +107,6 @@ pub enum Error {
     Save(anyhow::Error),
     #[error("Loaded empty borrower state")]
     EmptyState,
-    #[error("Deserialization failed: {0}")]
-    Deserialize(serde_json::Error),
-    #[error("Serialization failed: {0}")]
-    Serialize(serde_json::Error),
     #[error("Failed to interpret loan response: {0}")]
     InterpretLoanResponse(anyhow::Error),
     #[error("Not enough collateral to put up for loan")]

@@ -8,37 +8,30 @@ use crate::{
     Error, Wallet,
 };
 
+/// Load temporary loan_borrower state
+//
+/// When the frontend _asks_ the extension to
+/// sign a loan, the information gets stored in the background script first.
+/// When a request to bobtimus was made to actually take the loan,
+/// this temporary loan details are saved in localStorage.
+/// There can only be one pending loans at the time hence there is no identifier.
 pub(crate) async fn sign_loan(
     name: String,
     current_wallet: &Mutex<Option<Wallet>>,
 ) -> Result<Transaction, Error> {
     let storage = Storage::local_storage().map_err(Error::Storage)?;
-    // load temporary loan_borrower state. When the frontend _asks_ the extension to
-    // sign a loan, the information gets stored in the background script first.
-    // When a request to bobtimas was made to actually take the loan,
-    // this temporary loan details are saved in localStorage.
-    // There can only be one pending loans at the time hence there is no identifier.
-    let (borrower, loan_details) = load_borrower_state(&storage)?;
 
+    let (borrower, loan_details) = storage
+        .get_json_item::<(Borrower1, LoanDetails)>("borrower_state")
+        .map_err(Error::Load)?
+        .ok_or(Error::EmptyBorrowerState)?;
     let loan_transaction = sign_transaction(&name, current_wallet, &borrower).await?;
-
     // We don't broadcast this transaction ourselves, but we expect
     // the lender to do so very soon. We therefore save the borrower
     // state so that we can later on build, sign and broadcast the
     // repayment transaction
     update_open_loans(storage, &borrower, loan_details)?;
-
     Ok(loan_transaction)
-}
-
-fn load_borrower_state(storage: &Storage) -> Result<(Borrower1, LoanDetails), Error> {
-    let borrower = storage
-        .get_item::<String>("borrower_state")
-        .map_err(Error::Load)?
-        .ok_or(Error::EmptyBorrowerState)?;
-    let (borrower, loan_details) =
-        serde_json::from_str::<(Borrower1, LoanDetails)>(&borrower).map_err(Error::Deserialize)?;
-    Ok((borrower, loan_details))
 }
 
 async fn sign_transaction(
@@ -100,38 +93,28 @@ pub fn update_open_loans(
     borrower: &Borrower1,
     loan_details: LoanDetails,
 ) -> Result<(), Error> {
-    let open_loans_key = "open_loans";
-    let mut open_loans = match storage
-        .get_item::<String>(open_loans_key)
+    let mut open_loans = storage
+        .get_json_item::<Vec<LoanDetails>>("open_loans")
         .map_err(Error::Load)?
-    {
-        Some(open_loans) => serde_json::from_str(&open_loans).map_err(Error::Deserialize)?,
-        None => Vec::<LoanDetails>::new(),
-    };
+        .unwrap_or_default();
 
     let txid = loan_details.txid;
     if open_loans.iter().all(|item| item.txid != txid) {
         open_loans.push(loan_details);
         storage
-            .set_item(
-                open_loans_key,
-                serde_json::to_string(&open_loans).map_err(Error::Serialize)?,
-            )
+            .set_json_item("open_loans", &open_loans)
             .map_err(Error::Save)?;
         log::debug!("Stored new open loan: {} ", txid);
     }
 
     let loan_state_key = &format!("loan_state:{}", txid);
     if storage
-        .get_item::<String>(loan_state_key)
+        .get_json_item::<Borrower1>(loan_state_key)
         .map_err(Error::Load)?
         .is_none()
     {
         storage
-            .set_item(
-                loan_state_key,
-                serde_json::to_string(&borrower).map_err(Error::Serialize)?,
-            )
+            .set_json_item(loan_state_key, &borrower)
             .map_err(Error::Save)?;
         log::debug!("Stored new loan state: {} ", txid);
     }

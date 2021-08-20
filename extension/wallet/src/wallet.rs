@@ -278,7 +278,7 @@ impl Wallet {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 pub struct ListOfWallets(Vec<String>);
 
 impl ListOfWallets {

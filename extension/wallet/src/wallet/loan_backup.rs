@@ -26,15 +26,14 @@ pub async fn create_loan_backup(
     // We get a hold of the wallet to ensure that it is loaded. This is a security mechanism
     // to ensure no unauthorized access to the data.
     // Ideally all data is encrypted but that's just how it is :)
-    let _ = current(&name, current_wallet).await.unwrap();
+    let _ = current(&name, current_wallet)
+        .await
+        .map_err(Error::LoadWallet);
 
-    let open_loans = match storage
-        .get_item::<String>("open_loans")
+    let open_loans = storage
+        .get_json_item::<Vec<LoanDetails>>("open_loans")
         .map_err(Error::Load)?
-    {
-        Some(open_loans) => serde_json::from_str(&open_loans).map_err(Error::Deserialize)?,
-        None => Vec::<LoanDetails>::new(),
-    };
+        .unwrap_or_default();
 
     let loan_details = open_loans
         .iter()
@@ -43,10 +42,9 @@ pub async fn create_loan_backup(
 
     // get the borrower from loan_state
     let borrower = storage
-        .get_item::<String>(&format!("loan_state:{}", txid))
+        .get_json_item::<Borrower1>(&format!("loan_state:{}", txid))
         .map_err(Error::Load)?
         .ok_or(Error::EmptyState)?;
-    let borrower = serde_json::from_str::<Borrower1>(&borrower).map_err(Error::Deserialize)?;
 
     Ok(BackupDetails {
         loan_details: loan_details.clone(),
