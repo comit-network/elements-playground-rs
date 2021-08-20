@@ -236,7 +236,7 @@ function ConfirmLoan(
         <Box w="100%">
             <Flex>
                 <Box h="40px" p="1">
-                    <Text>Loan term: {timestamp} timestamp {deadline ? "(due " + deadline + ")" : ""}</Text>
+                    <Text>Loan term: {term} timestamp {deadline ? "(due " + deadline + ")" : ""}</Text>
                 </Box>
             </Flex>
         </Box>

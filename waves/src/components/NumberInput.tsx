@@ -1,10 +1,12 @@
-import { InputGroup, InputLeftAddon, NumberInputField, NumberInputStepper } from "@chakra-ui/react";
+import { InputGroup, InputLeftAddon, NumberInputField, NumberInputProps, NumberInputStepper } from "@chakra-ui/react";
 import { NumberInput as CUINumberInput } from "@chakra-ui/react";
 import React from "react";
 
 type StringOrNumber = string | number;
 
-function NumberInput({ currency, value, onAmountChange, precision, step, isDisabled, dataCy }: CustomInputProps) {
+function NumberInput(
+    { currency, value, onAmountChange, precision, step, isDisabled, dataCy, ...props }: CustomInputProps,
+) {
     const inputProps = isDisabled ? ASSET_INPUT_DISABLED_PROPS : ASSET_INPUT_PROPS;
     return (
         <InputGroup>
@@ -21,6 +23,7 @@ function NumberInput({ currency, value, onAmountChange, precision, step, isDisab
                 isDisabled={isDisabled}
                 min={0}
                 data-cy={`${dataCy}-amount-input`}
+                {...props}
             >
                 <NumberInputField />
                 <NumberInputStepper />
@@ -29,7 +32,7 @@ function NumberInput({ currency, value, onAmountChange, precision, step, isDisab
     );
 }
 
-interface CustomInputProps {
+interface CustomInputProps extends NumberInputProps {
     currency: string;
     value: StringOrNumber;
     precision: number;

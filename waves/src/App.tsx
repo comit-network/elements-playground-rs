@@ -36,6 +36,7 @@ export type Action =
     | { type: "UpdateBalance"; value: Balances }
     | { type: "UpdatePrincipalAmount"; value: string }
     | { type: "UpdateLoanTerm"; value: number }
+    | { type: "UpdateLoanCollateralization"; value: number }
     | { type: "UpdateLoanOffer"; value: LoanOffer };
 
 export interface TradeState {
@@ -219,7 +220,15 @@ export function reducer(state: State = initialState, action: Action) {
                 ...state,
                 borrow: {
                     ...state.borrow,
-                    loanTerm: action.value,
+                    loanTermInDays: action.value,
+                },
+            };
+        case "UpdateLoanCollateralization":
+            return {
+                ...state,
+                borrow: {
+                    ...state.borrow,
+                    collateralization: action.value,
                 },
             };
         case "UpdateLoanOffer":
