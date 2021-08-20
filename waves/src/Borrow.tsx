@@ -58,7 +58,7 @@ function Borrow({ dispatch, state, rate, wavesProvider, walletStatusAsyncState }
     let repaymentAmount = principalAmount + interestAmount;
 
     // The bid price is used so the lender is covered under the assumption of selling the asset
-    let collateralAmount = (repaymentAmount * state.collateralization) / rate.bid;
+    let collateralAmount = (repaymentAmount / rate.bid) / state.ltv;
 
     let { run: takeLoan, isLoading: isTakingLoan } = useAsync({
         deferFn: async () => {
@@ -78,7 +78,7 @@ function Borrow({ dispatch, state, rate, wavesProvider, walletStatusAsyncState }
                 let loanResponse = await postLoanRequest(
                     loanRequestWalletParams,
                     state.loanTermInDays,
-                    state.collateralization,
+                    state.ltv,
                     principalAmount,
                 );
                 debug(JSON.stringify(loanResponse));
@@ -193,7 +193,7 @@ function Borrow({ dispatch, state, rate, wavesProvider, walletStatusAsyncState }
                             />
                         </Box>
                     </Tooltip>
-                    <p>Collateral:</p>
+                    <p>Collateral (for LTV of {state.ltv * 100}%):</p>
                     <NumberInput
                         currency="₿"
                         value={collateralAmount}

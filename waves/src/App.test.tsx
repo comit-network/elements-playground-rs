@@ -17,9 +17,8 @@ const defaultLoanOffer: LoanOffer = {
         days: 30,
         interest_mod: 0.01,
     }],
-    collateralizations: [{
-        collateralization: 1.5,
-        interest_mod: -0.02,
+    initial_ltvs: [{
+        ltv: 0.5,
     }],
 };
 
@@ -39,7 +38,7 @@ const defaultState: State = {
     borrow: {
         principalAmount: "1000",
         loanTermInDays: 43200, // 30 days in min
-        collateralization: 1.5,
+        ltv: 0.5,
 
         loanOffer: defaultLoanOffer,
     },
@@ -229,7 +228,7 @@ test("update loan offer logic", () => {
             loanTermInDays: 0,
             principalAmount: "0",
             loanOffer: null,
-            collateralization: 0,
+            ltv: 0,
         },
     };
 
@@ -241,5 +240,5 @@ test("update loan offer logic", () => {
     expect(newState.borrow.loanOffer).toBe(defaultLoanOffer);
     expect(newState.borrow.principalAmount).toBe("100");
     expect(newState.borrow.loanTermInDays).toBe(30);
-    expect(newState.borrow.collateralization).toBe(1.5);
+    expect(newState.borrow.ltv).toBe(0.5);
 });

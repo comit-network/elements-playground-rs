@@ -49,16 +49,11 @@ export interface Term {
     interest_mod: number;
 }
 
-export interface Collateralization {
+export interface Ltv {
     // percentage, decimal represented as float
     // example:
-    // 1.5 => 150%
-    collateralization: number;
-    // percentage, decimal represented as float
-    // example:
-    // 0.01 => add 0.01 to base interest
-    // -0.01 => subtract 0.01 from base interest
-    interest_mod: number;
+    // 0.5 => 50%
+    ltv: number;
 }
 
 export interface LoanOffer {
@@ -71,14 +66,14 @@ export interface LoanOffer {
     max_ltv: number;
     base_interest_rate: number;
     terms: Term[];
-    collateralizations: Collateralization[];
+    initial_ltvs: Ltv[];
 }
 
 export interface LoanRequest {
     principal_amount: number;
     collateral_amount: number;
     collateral_inputs: { txin: OutPoint; original_txout: any; blinding_key: string }[];
-    collateralization: number;
+    ltv: number;
     borrower_pk: string;
     borrower_address: string;
 
@@ -106,7 +101,7 @@ export async function getLoanOffer(): Promise<LoanOffer> {
 export async function postLoanRequest(
     walletParams: LoanRequestPayload,
     termInDays: number,
-    collateralization: number,
+    requested_ltv: number,
     principal: number,
 ) {
     // TODO: Make sure to convert all the other amounts to sats as well
@@ -114,7 +109,7 @@ export async function postLoanRequest(
     let principal_sats = principal * BTC_SATS;
 
     let loanRequest: LoanRequest = {
-        collateralization: collateralization,
+        ltv: requested_ltv,
         principal_amount: principal_sats,
         borrower_address: walletParams.borrower_address,
         borrower_pk: walletParams.borrower_pk,

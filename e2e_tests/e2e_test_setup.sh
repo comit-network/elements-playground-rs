@@ -12,7 +12,7 @@ while getopts "CS" o; do
             then
                 echo "Clearing docker compose data"
                 cd nigiri
-                docker-compose down
+                docker compose down
                 rm -rf liquid-config/liquidregtest
                 cd ..
             else
@@ -21,7 +21,7 @@ while getopts "CS" o; do
             ;;
         S)
             echo "Starting docker containers"
-            docker-compose -f ./nigiri/docker-compose.yml up -d
+            docker compose -f ./nigiri/docker-compose.yml up -d
             ;;
         *)
             usage
@@ -73,7 +73,7 @@ echo "Bitcoin Asset ID: "$btc_asset_id
             start \
             --http 127.0.0.1:3030 \
             --elementsd http://admin1:123@localhost:18884 \
-            --usdt $usdt_asset_id > e2e_tests/bobtimus.log 2>&1 &
+            --usdt 2dcf5a8834645654911964ec3602426fd3b9b4017554d3f9c19403e7fc1411d3 > e2e_tests/bobtimus.log 2>&1 &
 )
 
 # give bobtimus time to start:

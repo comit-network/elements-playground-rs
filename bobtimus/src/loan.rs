@@ -6,6 +6,7 @@ use elements::{
     Address,
 };
 use rust_decimal::{prelude::ToPrimitive, Decimal};
+use rust_decimal_macros::dec;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LoanOffer {
@@ -51,8 +52,8 @@ pub struct LoanOffer {
     /// Interest in relation to terms
     pub terms: Vec<Term>,
 
-    /// Interest rates in relation to collteralization
-    pub collateralizations: Vec<Collateralization>,
+    /// Interest rates in relation to ltv
+    pub initial_ltvs: Vec<Ltv>,
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize)]
@@ -62,12 +63,11 @@ pub struct Term {
     pub interest_mod: Decimal,
 }
 
-/// Allows to specify a better rate for users that
+/// LTV (Loan-to-value) ratio defines the relation of loan value to collateral value, i.e.
+/// (principal_amount / (collateral_amount * current_rate)
 #[derive(Debug, Clone, Copy, serde::Serialize)]
-pub struct Collateralization {
-    pub collateralization: Decimal,
-    /// Interest to be added on top of the base interest rate for this term.
-    pub interest_mod: Decimal,
+pub struct Ltv {
+    pub ltv: Decimal,
 }
 
 // TODO: Make sure that removing sat_per_vbyte is OK here
@@ -76,7 +76,7 @@ pub struct LoanRequest {
     /// Loan term in days
     pub term: u32,
     pub principal_amount: LiquidUsdt,
-    pub collateralization: Decimal,
+    pub ltv: Decimal,
     pub collateral_amount: LiquidBtc,
     pub collateral_inputs: Vec<Input>,
     pub borrower_pk: PublicKey,
@@ -96,12 +96,15 @@ struct LoanValidationParams {
     request_principal: LiquidUsdt,
     min_principal: LiquidUsdt,
     max_principal: LiquidUsdt,
-    request_ltv: Decimal,
+    /// the LTV ratio the user has actually provided, i.e. it's calculated using the provided collateral
+    provided_ltv: Decimal,
+    /// the max allowed LTV
     max_ltv: Decimal,
     request_term: u32,
     terms: Vec<Term>,
-    request_collateralization: Decimal,
-    collateralizations: Vec<Collateralization>,
+    /// the LTV ratio the user has requested
+    requested_ltv: Decimal,
+    ltvs: Vec<Ltv>,
 }
 
 pub fn loan_calculation_and_validation(
@@ -110,13 +113,18 @@ pub fn loan_calculation_and_validation(
     price_fluctuation_interval: (Decimal, Decimal),
     current_price: LiquidUsdt,
 ) -> Result<ValidatedLoan> {
-    let interest_rate = calculate_interest_rate(
-        loan_request.term,
-        loan_request.collateralization,
-        &loan_offer.terms,
-        &loan_offer.collateralizations,
-        loan_offer.base_interest_rate,
-    )?;
+    let selected_term = match loan_offer
+        .terms
+        .iter()
+        .find(|term| loan_request.term == term.days)
+    {
+        None => Err(LoanValidationError::TermNotAllowed {
+            term: loan_request.term,
+        }),
+        Some(term) => Ok(term),
+    }?;
+
+    let interest_rate = calculate_interest_rate(&selected_term, loan_offer.base_interest_rate)?;
 
     let repayment_amount =
         calculate_repayment_amount(loan_request.principal_amount, interest_rate)?;
@@ -124,10 +132,10 @@ pub fn loan_calculation_and_validation(
     let request_price = calculate_request_price(
         repayment_amount,
         loan_request.collateral_amount,
-        loan_request.collateralization,
+        loan_request.ltv,
     )?;
 
-    let request_ltv = calculate_ltv(
+    let provided_ltv = calculate_ltv(
         repayment_amount,
         loan_request.collateral_amount,
         current_price,
@@ -140,12 +148,12 @@ pub fn loan_calculation_and_validation(
         request_principal: loan_request.principal_amount,
         min_principal: loan_offer.min_principal,
         max_principal: loan_offer.max_principal,
-        request_ltv,
+        provided_ltv,
         max_ltv: loan_offer.max_ltv,
         request_term: loan_request.term,
         terms: loan_offer.terms.clone(),
-        request_collateralization: loan_request.collateralization,
-        collateralizations: loan_offer.collateralizations.clone(),
+        requested_ltv: loan_request.ltv,
+        ltvs: loan_offer.initial_ltvs.clone(),
     })??;
 
     let liquidation_price = calculate_liquidation_price(
@@ -162,38 +170,10 @@ pub fn loan_calculation_and_validation(
     Ok(validated_loan)
 }
 
-fn calculate_interest_rate(
-    borrower_term: u32,
-    borrower_collateralization: Decimal,
-    term_thresholds: &[Term],
-    collateralization_thresholds: &[Collateralization],
-    base_interest_rate: Decimal,
-) -> Result<Decimal> {
-    let mut term_interest_mod = Decimal::ZERO;
-    for term in term_thresholds {
-        if borrower_term >= term.days {
-            term_interest_mod = term.interest_mod;
-            continue;
-        }
-        break;
-    }
-
-    let mut collateralization_interest_mod = Decimal::ZERO;
-    for collateralization in collateralization_thresholds {
-        if borrower_collateralization >= collateralization.collateralization {
-            collateralization_interest_mod = collateralization.interest_mod;
-            continue;
-        }
-        break;
-    }
-
-    let interest_rate = base_interest_rate
-        .checked_add(term_interest_mod)
-        .context("Overflow due to addition")?
-        .checked_add(collateralization_interest_mod)
-        .context("Overflow due to addition")?;
-
-    Ok(interest_rate)
+fn calculate_interest_rate(selected_term: &Term, base_interest_rate: Decimal) -> Result<Decimal> {
+    base_interest_rate
+        .checked_add(selected_term.interest_mod)
+        .context("Overflow due to addition")
 }
 
 fn calculate_repayment_amount(
@@ -260,25 +240,37 @@ fn calculate_liquidation_price(
     Ok(liquidation_price)
 }
 
+/// calculates the `request_price`, i.e. the exchange rate the borrower took when selecting loan terms
+///
+/// the `request_price` is calculated as following:
+///
+/// LTV = repayment_amount / (collateral_amount * rate) | * (collateral_amount * rate)
+/// LTV * (collateral_amount * rate) = repayment_amount | / collateral_amount
+/// LTV * rate = repayment_amount * collateral_amount | / LTV
+/// rate = (repayment_amount / collateral) / LTV
+///
+/// --> rate = request_price
 fn calculate_request_price(
     repayment_amount: LiquidUsdt,
     collateral_amount: LiquidBtc,
-    collateralization: Decimal,
+    ltv: Decimal,
 ) -> Result<LiquidUsdt> {
+    let one_btc_as_sat = Decimal::from(Amount::ONE_BTC.as_sat());
+
     let repayment_amount = Decimal::from(repayment_amount.as_satodollar());
 
-    let one_btc_as_sat = Decimal::from(Amount::ONE_BTC.as_sat());
     let collateral_as_btc = Decimal::from(collateral_amount.0.as_sat())
         .checked_div(one_btc_as_sat)
         .context("division error")?;
 
-    let price = repayment_amount
-        .checked_div(
-            collateral_as_btc
-                .checked_div(collateralization)
-                .context("division error")?,
-        )
+    let repayment_div_collateral = repayment_amount
+        .checked_div(collateral_as_btc)
         .context("division error")?;
+
+    let price = repayment_div_collateral
+        .checked_div(ltv)
+        .context("division error")?;
+
     let price = LiquidUsdt::from_satodollar(
         price
             .to_u64()
@@ -288,6 +280,9 @@ fn calculate_request_price(
     Ok(price)
 }
 
+/// calculates provided LTV ratio
+///
+/// provided_ltv = repayment_amount / (collateral_amount * current_bid_price)
 fn calculate_ltv(
     repayment_amount: LiquidUsdt,
     collateral_amount: LiquidBtc,
@@ -334,19 +329,29 @@ pub enum LoanValidationError {
         max_principal: LiquidUsdt,
     },
 
-    #[error("The LTV value {request_ltv} is above the configured maximum {max_ltv}")]
+    #[error("The LTV value {provided_ltv} is above the configured maximum {max_ltv}")]
     LtvAboveMax {
-        request_ltv: Decimal,
+        provided_ltv: Decimal,
         max_ltv: Decimal,
     },
 
     #[error("The given term {term} is not allowed")]
     TermNotAllowed { term: u32 },
 
-    #[error("The given collateralization {request_collateralization} is below the configured minimum {min_collateralization}")]
-    CollateralizationBelowMin {
-        request_collateralization: Decimal,
-        min_collateralization: Decimal,
+    #[error(
+        "The requested ltv {requested_ltv} was not offered (available ltvs: {:?})",
+        offered_ltvs
+    )]
+    InvalidRequestedLtv {
+        requested_ltv: Decimal,
+        offered_ltvs: Vec<Decimal>,
+    },
+    #[error(
+        "The provided ltv {provided_ltv} does not match the not selected LTV {requested_ltv})"
+    )]
+    InvalidProvidedLtv {
+        provided_ltv: Decimal,
+        requested_ltv: Decimal,
     },
 }
 
@@ -360,12 +365,12 @@ fn validate_loan_is_acceptable(
         request_principal,
         min_principal,
         max_principal,
-        request_ltv,
+        provided_ltv,
         max_ltv,
         request_term,
         terms,
-        request_collateralization,
-        collateralizations,
+        requested_ltv,
+        ltvs,
     } = loan_validation_params;
 
     let request_price_dec = Decimal::from(request_price.as_satodollar());
@@ -403,27 +408,34 @@ fn validate_loan_is_acceptable(
         }));
     }
 
-    // If no collateraliztion thresholds are specified in the offer then we ignore this check and only check for LTV
-    // Note that as a safety net the LTV still outweights the collateralization check.
-    if !collateralizations.is_empty() {
-        let mut sorted_collateralizations = collateralizations;
-        sorted_collateralizations.sort_by(|a, b| a.collateralization.cmp(&b.collateralization));
-        let min_collateralization = sorted_collateralizations
-            .first()
-            .context("Unable to determine minimum collateralization")?
-            .collateralization;
-
-        if request_collateralization < min_collateralization {
-            return Ok(Err(LoanValidationError::CollateralizationBelowMin {
-                request_collateralization,
-                min_collateralization,
-            }));
-        }
+    // we allow for slight price variations of 1% up or down
+    let one_percent = requested_ltv
+        .checked_mul(dec!(0.01))
+        .context("multiplication error")?;
+    let plus_one_percent = requested_ltv
+        .checked_add(one_percent)
+        .context("Addition error")?;
+    let minus_one_percent = requested_ltv
+        .checked_sub(one_percent)
+        .context("Subtraction error")?;
+    if provided_ltv > plus_one_percent || provided_ltv < minus_one_percent {
+        return Ok(Err(LoanValidationError::InvalidProvidedLtv {
+            provided_ltv,
+            requested_ltv,
+        }));
     }
 
-    if request_ltv > max_ltv {
+    // we take the requested_ltv because the actual (provided_ltv) might be impacted by price fluctuations
+    if !ltvs.iter().any(|ltv| requested_ltv == ltv.ltv) {
+        return Ok(Err(LoanValidationError::InvalidRequestedLtv {
+            requested_ltv,
+            offered_ltvs: ltvs.iter().map(|ltv| ltv.ltv).collect(),
+        }));
+    }
+
+    if provided_ltv > max_ltv {
         return Ok(Err(LoanValidationError::LtvAboveMax {
-            request_ltv,
+            provided_ltv,
             max_ltv,
         }));
     }
@@ -447,12 +459,20 @@ mod tests {
 
     #[test]
     fn test_loan_calculation_and_validation() {
+        // LTV of 0.5 = 200% collateralization
+        //
+        // interest rate = 5%
+        // principal_amount = 10,000,
+        // initial_price = 10,500
+        // then we need 2 BTC collateral
+        //
+        // collateral = (principal_amount + principal_amount * interest_rate) / initial_price / ltv
+        // collateral = repayment_amount / initial_price / ltv
         let loan_request = LoanRequest {
             term: 30,
             principal_amount: LiquidUsdt::from_str_in_dollar("10000").unwrap(),
-            collateralization: dec!(1.4),
-            collateral_amount: Amount::from_btc(0.3675).unwrap().into(),
-
+            ltv: dec!(0.5),
+            collateral_amount: Amount::from_btc(2.0).unwrap().into(),
             // irrelevant for this test
             collateral_inputs: vec![],
             borrower_pk: PublicKey::from_str("0218845781f631c48f1c9709e23092067d06837f30aa0cd0544ac887fe91ddd166").unwrap(),
@@ -469,74 +489,13 @@ mod tests {
                 days: 30,
                 interest_mod: Decimal::ZERO,
             }],
-            collateralizations: vec![],
+            // not relevant for test but to show as reference - that's what the borrower can chose
+            initial_ltvs: vec![Ltv { ltv: dec!(0.5) }],
 
             // irrelevant for this test
             rate: Rate {
-                ask: Default::default(),
-                bid: Default::default(),
-            },
-            fee_sats_per_vbyte: Default::default(),
-        };
-
-        let current_price = LiquidUsdt::from_str_in_dollar("40000").unwrap();
-        let price_fluctuation_interval = (dec!(0.99), dec!(1.01));
-
-        let ValidatedLoan {
-            repayment_amount,
-            liquidation_price,
-        } = loan_calculation_and_validation(
-            &loan_request,
-            &loan_offer,
-            price_fluctuation_interval,
-            current_price,
-        )
-        .unwrap();
-
-        assert_eq!(
-            repayment_amount,
-            LiquidUsdt::from_str_in_dollar("10500").unwrap()
-        );
-        assert_eq!(
-            liquidation_price,
-            LiquidUsdt::from_str_in_dollar("38095.23809523").unwrap()
-        );
-    }
-
-    #[test]
-    fn test_loan_calculation_and_validation_whole_numbers() {
-        // In this test we assume the lender is only slightly over-collateralizing the loan.
-        // For simplicity reasons and reproducibility we set the the exchange rate to 10_500/BTC
-        // This has the effect that the lender over-collateralized with 50% (or a total of 150%),
-        // i.e. 1.5 BTC.
-        let loan_request = LoanRequest {
-            term: 30,
-            principal_amount: LiquidUsdt::from_str_in_dollar("10000").unwrap(),
-            collateralization: dec!(1.5),
-            collateral_amount: Amount::from_btc(1.5).unwrap().into(),
-
-            // irrelevant for this test
-            collateral_inputs: vec![],
-            borrower_pk: PublicKey::from_str("0218845781f631c48f1c9709e23092067d06837f30aa0cd0544ac887fe91ddd166").unwrap(),
-            borrower_address: Address::from_str("el1qq0zel5lg55nvhv9kkrq8gme8hnvp0lemuzcmu086dn2m8laxjgkewkhqnh8vxdnlp4cejs3925j0gu9n9krdgmqm89vku0kc8").unwrap()
-        };
-
-        let loan_offer = LoanOffer {
-            min_principal: LiquidUsdt::from_str_in_dollar("1000").unwrap(),
-            max_principal: LiquidUsdt::from_str_in_dollar("10000").unwrap(),
-            max_ltv: dec!(0.75),
-            base_interest_rate: dec!(0.05),
-
-            terms: vec![Term {
-                days: 30,
-                interest_mod: Decimal::ZERO,
-            }],
-            collateralizations: vec![],
-
-            // irrelevant for this test
-            rate: Rate {
-                ask: Default::default(),
-                bid: Default::default(),
+                ask: LiquidUsdt::from_str_in_dollar("10500").unwrap(),
+                bid: LiquidUsdt::from_str_in_dollar("10500").unwrap(),
             },
             fee_sats_per_vbyte: Default::default(),
         };
@@ -559,10 +518,78 @@ mod tests {
             repayment_amount,
             LiquidUsdt::from_str_in_dollar("10500").unwrap()
         );
+        assert_eq!(
+            liquidation_price,
+            LiquidUsdt::from_str_in_dollar("7000").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_loan_calculation_and_validation_whole_numbers() {
+        // LTV of 0.70 = 150% collateralization
+        //
+        // interest rate = 5%
+        // principal_amount = 10,000,
+        // initial_price = 10,000
+        // then we need 1.5 BTC collateral
+        //
+        // collateral = (principal_amount + principal_amount * interest_rate) / initial_price / ltv
+        // collateral = repayment_amount / initial_price / ltv
+        let loan_request = LoanRequest {
+            term: 30,
+            principal_amount: LiquidUsdt::from_str_in_dollar("10000").unwrap(),
+            ltv: dec!(0.70),
+            collateral_amount: Amount::from_btc(1.5).unwrap().into(),
+
+            // irrelevant for this test
+            collateral_inputs: vec![],
+            borrower_pk: PublicKey::from_str("0218845781f631c48f1c9709e23092067d06837f30aa0cd0544ac887fe91ddd166").unwrap(),
+            borrower_address: Address::from_str("el1qq0zel5lg55nvhv9kkrq8gme8hnvp0lemuzcmu086dn2m8laxjgkewkhqnh8vxdnlp4cejs3925j0gu9n9krdgmqm89vku0kc8").unwrap()
+        };
+
+        let loan_offer = LoanOffer {
+            min_principal: LiquidUsdt::from_str_in_dollar("1000").unwrap(),
+            max_principal: LiquidUsdt::from_str_in_dollar("10000").unwrap(),
+            max_ltv: dec!(0.75),
+            base_interest_rate: dec!(0.05),
+
+            terms: vec![Term {
+                days: 30,
+                interest_mod: Decimal::ZERO,
+            }],
+            // not relevant for test but to show as reference - that's what the borrower can chose
+            initial_ltvs: vec![Ltv { ltv: dec!(0.70) }],
+
+            // irrelevant for this test
+            rate: Rate {
+                ask: LiquidUsdt::from_str_in_dollar("10500").unwrap(),
+                bid: LiquidUsdt::from_str_in_dollar("10500").unwrap(),
+            },
+            fee_sats_per_vbyte: Default::default(),
+        };
+
+        let current_price = LiquidUsdt::from_str_in_dollar("10000").unwrap();
+        let price_fluctuation_interval = (dec!(0.99), dec!(1.01));
+
+        let ValidatedLoan {
+            repayment_amount,
+            liquidation_price,
+        } = loan_calculation_and_validation(
+            &loan_request,
+            &loan_offer,
+            price_fluctuation_interval,
+            current_price,
+        )
+        .unwrap();
+
+        assert_eq!(
+            repayment_amount,
+            LiquidUsdt::from_str_in_dollar("10500").unwrap()
+        );
         // The `liquidation_price` is calculated by :
         // `(repayment_amount / current_ltv) / collateral_amount`
         // or with numbers in this example:
-        // (10_500 / 0.75 ) / 1.5 = 9333.33333333
+        // (10000 / 0.75 ) / 1.5 = 9333.33333333
         assert_eq!(
             liquidation_price,
             LiquidUsdt::from_str_in_dollar("9333.33333333").unwrap()
@@ -571,63 +598,33 @@ mod tests {
 
     #[test]
     fn test_calculate_interest_rate() {
-        let term_thresholds = vec![Term {
-            days: 30,
-            interest_mod: dec!(0.001),
-        }];
-        let collateralization_thresholds = vec![Collateralization {
-            collateralization: dec!(1.5),
-            interest_mod: dec!(-0.002),
-        }];
+        let term_thresholds = vec![
+            Term {
+                days: 30,
+                interest_mod: dec!(0.001),
+            },
+            Term {
+                days: 90,
+                interest_mod: dec!(0.004),
+            },
+            Term {
+                days: 180,
+                interest_mod: dec!(0.008),
+            },
+        ];
         let base_interest_rate = dec!(0.05);
 
-        let borrower_term = 30;
-        let borrower_collateralization = dec!(1.5);
-        let interest_rate = calculate_interest_rate(
-            borrower_term,
-            borrower_collateralization,
-            &term_thresholds,
-            &collateralization_thresholds,
-            base_interest_rate,
-        )
-        .unwrap();
-        assert_eq!(interest_rate, dec!(0.049));
-
-        let borrower_term = 29;
-        let borrower_collateralization = dec!(1.4);
-        let interest_rate = calculate_interest_rate(
-            borrower_term,
-            borrower_collateralization,
-            &term_thresholds,
-            &collateralization_thresholds,
-            base_interest_rate,
-        )
-        .unwrap();
-        assert_eq!(interest_rate, dec!(0.05));
-
-        let borrower_term = 30;
-        let borrower_collateralization = dec!(1.4);
-        let interest_rate = calculate_interest_rate(
-            borrower_term,
-            borrower_collateralization,
-            &term_thresholds,
-            &collateralization_thresholds,
-            base_interest_rate,
-        )
-        .unwrap();
+        let interest_rate =
+            calculate_interest_rate(&term_thresholds[0], base_interest_rate).unwrap();
         assert_eq!(interest_rate, dec!(0.051));
 
-        let borrower_term = 29;
-        let borrower_collateralization = dec!(1.5);
-        let interest_rate = calculate_interest_rate(
-            borrower_term,
-            borrower_collateralization,
-            &term_thresholds,
-            &collateralization_thresholds,
-            base_interest_rate,
-        )
-        .unwrap();
-        assert_eq!(interest_rate, dec!(0.048));
+        let interest_rate =
+            calculate_interest_rate(&term_thresholds[1], base_interest_rate).unwrap();
+        assert_eq!(interest_rate, dec!(0.054));
+
+        let interest_rate =
+            calculate_interest_rate(&term_thresholds[2], base_interest_rate).unwrap();
+        assert_eq!(interest_rate, dec!(0.058));
     }
 
     #[test]
@@ -685,15 +682,38 @@ mod tests {
     }
 
     #[test]
-    fn test_calculate_price() {
-        let repayment_amount = LiquidUsdt::from_str_in_dollar("10500").unwrap();
-        let collateral = LiquidBtc::from(Amount::from_btc(0.39375).unwrap());
-        let collateralization = dec!(1.5);
+    fn test_calculate_price_using_ltv_and_collateral_of_one_btc() {
+        let repayment_amount = LiquidUsdt::from_str_in_dollar("10000").unwrap();
+        let collateral = LiquidBtc::from(Amount::from_btc(1.0).unwrap());
+        let ltv = dec!(1.0);
 
-        let price =
-            calculate_request_price(repayment_amount, collateral, collateralization).unwrap();
+        let price = calculate_request_price(repayment_amount, collateral, ltv).unwrap();
 
-        assert_eq!(price, LiquidUsdt::from_str_in_dollar("40000").unwrap());
+        assert_eq!(price, LiquidUsdt::from_str_in_dollar("10000").unwrap());
+    }
+
+    #[test]
+    fn test_calculate_price_200_percent_collateralization() {
+        let repayment_amount = LiquidUsdt::from_str_in_dollar("10000").unwrap();
+        let collateral = LiquidBtc::from(Amount::from_btc(2.0).unwrap());
+        // LTV of 0.5 = 200% collateral
+        let ltv = dec!(0.5);
+
+        let price = calculate_request_price(repayment_amount, collateral, ltv).unwrap();
+
+        assert_eq!(price, LiquidUsdt::from_str_in_dollar("10000").unwrap());
+    }
+
+    #[test]
+    fn test_calculate_price_125_percent_collateralization() {
+        let repayment_amount = LiquidUsdt::from_str_in_dollar("10000").unwrap();
+        let collateral = LiquidBtc::from(Amount::from_btc(1.25).unwrap());
+        // LTV of 0.75 = 125% collateral
+        let ltv = dec!(0.80);
+
+        let price = calculate_request_price(repayment_amount, collateral, ltv).unwrap();
+
+        assert_eq!(price, LiquidUsdt::from_str_in_dollar("10000").unwrap());
     }
 
     #[test]
@@ -809,41 +829,79 @@ mod tests {
     }
 
     #[test]
-    fn given_loan_request_with_collateralization_lower_min_then_error() {
-        let collateralizations = vec![Collateralization {
-            collateralization: dec!(1.5),
-            interest_mod: Decimal::ZERO,
-        }];
-        let request_collateralization = dec!(1.4);
+    fn given_loan_request_with_ltv_not_offered_returns_error() {
+        let ltvs = vec![Ltv { ltv: dec!(0.75) }];
+        // honest user, provided_ltv = requested_ltv
+        let requested_ltv = dec!(0.5);
+        let provided_ltv = requested_ltv;
 
         let loan_validation_params = LoanValidationParams::test_defaults()
-            .with_request_collateralization(request_collateralization)
-            .with_collateralizations(collateralizations.clone());
+            .with_requested_ltv(requested_ltv)
+            .with_provided_ltv(provided_ltv)
+            .with_ltvs(ltvs.clone());
 
-        let error = validate_loan_is_acceptable(loan_validation_params.clone())
+        let error = validate_loan_is_acceptable(loan_validation_params)
             .unwrap()
             .unwrap_err();
 
         assert_eq!(
             error,
-            LoanValidationError::CollateralizationBelowMin {
-                request_collateralization: loan_validation_params.request_collateralization,
-                min_collateralization: collateralizations.first().unwrap().collateralization,
+            LoanValidationError::InvalidRequestedLtv {
+                requested_ltv,
+                offered_ltvs: ltvs.iter().map(|ltv| ltv.ltv).collect(),
             }
-        )
+        );
     }
 
     #[test]
-    fn given_loan_request_with_collateralization_higher_max_threshold_then_no_error() {
-        let collateralizations = vec![Collateralization {
-            collateralization: dec!(1.5),
-            interest_mod: Decimal::ZERO,
-        }];
-        let request_collateralization = dec!(10.0);
+    fn given_loan_request_different_ltv_than_selected_returns_error() {
+        let ltvs = vec![Ltv { ltv: dec!(0.75) }, Ltv { ltv: dec!(0.5) }];
+        let requested_ltv = dec!(0.5);
+        let provided_ltv = dec!(0.75);
 
         let loan_validation_params = LoanValidationParams::test_defaults()
-            .with_request_collateralization(request_collateralization)
-            .with_collateralizations(collateralizations);
+            .with_requested_ltv(requested_ltv)
+            .with_provided_ltv(provided_ltv)
+            .with_ltvs(ltvs);
+
+        let error = validate_loan_is_acceptable(loan_validation_params)
+            .unwrap()
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            LoanValidationError::InvalidProvidedLtv {
+                requested_ltv,
+                provided_ltv
+            }
+        );
+    }
+    #[test]
+    fn requested_ltv_is_slightly_different_to_provided_ltv() {
+        let ltvs = vec![Ltv { ltv: dec!(0.75) }, Ltv { ltv: dec!(0.5) }];
+        let requested_ltv = dec!(0.5);
+        let provided_ltv = dec!(0.505);
+
+        let loan_validation_params = LoanValidationParams::test_defaults()
+            .with_requested_ltv(requested_ltv)
+            .with_provided_ltv(provided_ltv)
+            .with_ltvs(ltvs);
+
+        validate_loan_is_acceptable(loan_validation_params)
+            .unwrap()
+            .unwrap();
+    }
+
+    #[test]
+    fn given_loan_request_with_in_list_is_ok() {
+        let ltvs = vec![Ltv { ltv: dec!(0.75) }];
+        let requested_ltv = dec!(0.75);
+        let provided_ltv = dec!(0.75);
+
+        let loan_validation_params = LoanValidationParams::test_defaults()
+            .with_requested_ltv(requested_ltv)
+            .with_provided_ltv(provided_ltv)
+            .with_ltvs(ltvs);
 
         validate_loan_is_acceptable(loan_validation_params)
             .unwrap()
@@ -860,18 +918,15 @@ mod tests {
             let request_principal = LiquidUsdt::from_str_in_dollar("1000").unwrap();
             let min_principal = LiquidUsdt::from_str_in_dollar("1000").unwrap();
             let max_principal = LiquidUsdt::from_str_in_dollar("10000").unwrap();
-            let request_ltv = dec!(0.8);
+            let provided_ltv = dec!(0.5);
             let max_ltv = dec!(0.8);
             let request_term = 30;
             let terms = vec![Term {
                 days: 30,
                 interest_mod: Decimal::ZERO,
             }];
-            let request_collateralization = dec!(1.5);
-            let collateralizations = vec![Collateralization {
-                collateralization: dec!(1.5),
-                interest_mod: Decimal::ZERO,
-            }];
+            let requested_ltv = dec!(0.5);
+            let ltvs = vec![Ltv { ltv: dec!(0.5) }];
 
             LoanValidationParams {
                 request_price,
@@ -880,12 +935,12 @@ mod tests {
                 request_principal,
                 min_principal,
                 max_principal,
-                request_ltv,
+                provided_ltv,
                 max_ltv,
                 request_term,
                 terms,
-                request_collateralization,
-                collateralizations,
+                requested_ltv,
+                ltvs,
             }
         }
 
@@ -916,8 +971,8 @@ mod tests {
             self.max_principal = max_principal;
             self
         }
-        pub fn with_request_ltv(mut self, request_ltv: Decimal) -> Self {
-            self.request_ltv = request_ltv;
+        pub fn with_provided_ltv(mut self, provided_ltv: Decimal) -> Self {
+            self.provided_ltv = provided_ltv;
             self
         }
         pub fn with_max_ltv(mut self, max_ltv: Decimal) -> Self {
@@ -932,18 +987,12 @@ mod tests {
             self.terms = terms;
             self
         }
-        pub fn with_request_collateralization(
-            mut self,
-            request_collateralization: Decimal,
-        ) -> Self {
-            self.request_collateralization = request_collateralization;
+        pub fn with_requested_ltv(mut self, requested_ltv: Decimal) -> Self {
+            self.requested_ltv = requested_ltv;
             self
         }
-        pub fn with_collateralizations(
-            mut self,
-            collateralizations: Vec<Collateralization>,
-        ) -> Self {
-            self.collateralizations = collateralizations;
+        pub fn with_ltvs(mut self, ltvs: Vec<Ltv>) -> Self {
+            self.ltvs = ltvs;
             self
         }
     }

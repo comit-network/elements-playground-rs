@@ -44,7 +44,7 @@ pub mod problem;
 pub mod schema;
 
 use crate::loan::{
-    loan_calculation_and_validation, Collateralization, LoanOffer, LoanRequest, Term, ValidatedLoan,
+    loan_calculation_and_validation, LoanOffer, LoanRequest, Ltv, Term, ValidatedLoan,
 };
 pub use amounts::*;
 use elements::bitcoin::PublicKey;
@@ -304,16 +304,7 @@ where
                     interest_mod: Decimal::ZERO,
                 },
             ],
-            collateralizations: vec![
-                Collateralization {
-                    collateralization: dec!(1.5),
-                    interest_mod: Decimal::ZERO,
-                },
-                Collateralization {
-                    collateralization: dec!(2.0),
-                    interest_mod: Decimal::ZERO,
-                },
-            ],
+            initial_ltvs: vec![Ltv { ltv: dec!(0.5) }, Ltv { ltv: dec!(0.7) }],
         }
     }
 
